@@ -198,7 +198,7 @@ impl cosmic::Application for DockerApplet {
             let btn = self
                 .core
                 .applet
-                .icon_button("application-x-executable-symbolic")
+                .icon_button("cosmic-applet-docker-symbolic")
                 .on_press(Message::TogglePopup);
             widget::row()
                 .push(btn)
@@ -209,7 +209,7 @@ impl cosmic::Application for DockerApplet {
         } else {
             self.core
                 .applet
-                .icon_button("application-x-executable-symbolic")
+                .icon_button("cosmic-applet-docker-symbolic")
                 .on_press(Message::TogglePopup)
                 .into()
         }
