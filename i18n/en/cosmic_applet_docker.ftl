@@ -1,0 +1,12 @@
+docker-containers = Docker Containers
+no-containers = No containers found
+docker-unavailable = Docker daemon unavailable
+start = Start
+stop = Stop
+restart = Restart
+logs = Logs
+back = Back
+stopped = Stopped
+running = Running
+container-logs = Container Logs
+loading = Loading...

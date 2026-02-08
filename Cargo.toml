@@ -1,0 +1,18 @@
+[package]
+name = "cosmic-applet-docker"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+libcosmic = { git = "https://github.com/pop-os/libcosmic.git", default-features = false, features = ["applet", "tokio", "wayland"] }
+bollard = "0.18"
+futures = "0.3"
+tokio = { version = "1", features = ["time", "sync"] }
+serde = { version = "1.0", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+tracing-log = "0.2"
+i18n-embed = { version = "0.16", features = ["fluent-system", "desktop-requester"] }
+i18n-embed-fl = "0.10"
+rust-embed = "8"
+once_cell = "1"

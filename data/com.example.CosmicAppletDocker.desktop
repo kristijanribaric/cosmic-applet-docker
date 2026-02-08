@@ -1,0 +1,14 @@
+[Desktop Entry]
+Name=Docker Containers
+Comment=Manage Docker containers from the panel
+Type=Application
+Exec=cosmic-applet-docker
+Terminal=false
+Categories=COSMIC;System;
+Keywords=COSMIC;Docker;Container;
+Icon=application-x-executable-symbolic
+StartupNotify=true
+NoDisplay=true
+X-CosmicApplet=true
+X-CosmicHoverPopup=Auto
+X-OverflowPriority=10
