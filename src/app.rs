@@ -267,7 +267,7 @@ impl cosmic::Application for DockerApplet {
 
 impl DockerApplet {
     fn view_container_list(&self) -> Element<'_, Message> {
-        let mut content = widget::column().spacing(8).width(Length::Fill);
+        let mut content = widget::column().spacing(8).width(Length::Fill).padding([0, 12]);
 
         // Header
         let running_count = self
@@ -276,14 +276,14 @@ impl DockerApplet {
             .filter(|c| c.state == ContainerState::Running)
             .count();
 
-        let header = widget::row()
-            .push(text::title4(fl!("docker-containers")))
-            .push(widget::horizontal_space())
-            .push(text::body(format!("({})", running_count)))
-            .align_y(Alignment::Center)
-            .padding(8);
+        let header = text::heading(format!(
+            "{} · {} running",
+            fl!("docker-containers"),
+            running_count
+        ))
+        .width(Length::Fill);
 
-        content = content.push(header);
+        content = content.push(widget::container(header).padding(8));
 
         if !self.docker_available {
             content = content.push(
@@ -349,35 +349,40 @@ impl DockerApplet {
 
         let stats_text = if let Some(stats) = self.stats.get(&container.id) {
             format!(
-                "{:.1}% | {:.0}M",
-                stats.cpu_percent, stats.memory_usage_mb
+                "CPU {:.1}%  ·  MEM {}",
+                stats.cpu_percent,
+                format_memory(stats.memory_usage_mb)
             )
         } else {
-            "-- | --".to_string()
+            "CPU --  ·  MEM --".to_string()
         };
 
-        let name_row = widget::row()
-            .push(text::body(&container.name).width(Length::Fill))
-            .push(text::caption(stats_text))
-            .align_y(Alignment::Center)
-            .spacing(8);
-
-        let image_text = text::caption(&container.image);
-
+        // Row 1: name + action buttons
         let actions: Element<Message> = if is_pending {
             text::caption(fl!("loading")).into()
         } else {
             widget::row()
                 .push(
-                    widget::button::destructive(fl!("stop"))
-                        .on_press(Message::StopContainer(container.id.clone())),
+                    widget::button::icon(widget::icon::from_name(
+                        "media-playback-stop-symbolic",
+                    ))
+                    .extra_small()
+                    .tooltip(fl!("stop"))
+                    .on_press(Message::StopContainer(container.id.clone())),
                 )
                 .push(
-                    widget::button::standard(fl!("restart"))
+                    widget::button::icon(widget::icon::from_name("view-refresh-symbolic"))
+                        .extra_small()
+                        .tooltip(fl!("restart"))
                         .on_press(Message::RestartContainer(container.id.clone())),
                 )
                 .push(
-                    widget::button::text(fl!("logs")).on_press(Message::ShowLogs(
+                    widget::button::icon(widget::icon::from_name(
+                        "utilities-terminal-symbolic",
+                    ))
+                    .extra_small()
+                    .tooltip(fl!("logs"))
+                    .on_press(Message::ShowLogs(
                         container.id.clone(),
                         container.name.clone(),
                     )),
@@ -387,17 +392,23 @@ impl DockerApplet {
                 .into()
         };
 
-        let image_row = widget::row()
-            .push(image_text)
-            .push(widget::horizontal_space())
+        let name_row = widget::row()
+            .push(text::body(&container.name).width(Length::Fill))
             .push(actions)
             .align_y(Alignment::Center)
             .spacing(8);
 
+        // Row 2: image
+        let image_row = text::caption(&container.image);
+
+        // Row 3: stats
+        let stats_row = text::caption(stats_text);
+
         widget::column()
             .push(name_row)
             .push(image_row)
-            .spacing(4)
+            .push(stats_row)
+            .spacing(2)
             .padding(8)
             .width(Length::Fill)
             .into()
@@ -406,24 +417,26 @@ impl DockerApplet {
     fn view_stopped_container<'a>(&'a self, container: &'a ContainerInfo) -> Element<'a, Message> {
         let is_pending = self.pending_ops.contains(&container.id);
 
-        let name_row = widget::row()
-            .push(text::body(&container.name).width(Length::Fill))
-            .push(text::caption(&container.status))
-            .align_y(Alignment::Center)
-            .spacing(8);
-
-        let image_text = text::caption(&container.image);
-
+        // Row 1: name + action buttons
         let actions: Element<Message> = if is_pending {
             text::caption(fl!("loading")).into()
         } else {
             widget::row()
                 .push(
-                    widget::button::suggested(fl!("start"))
-                        .on_press(Message::StartContainer(container.id.clone())),
+                    widget::button::icon(widget::icon::from_name(
+                        "media-playback-start-symbolic",
+                    ))
+                    .extra_small()
+                    .tooltip(fl!("start"))
+                    .on_press(Message::StartContainer(container.id.clone())),
                 )
                 .push(
-                    widget::button::text(fl!("logs")).on_press(Message::ShowLogs(
+                    widget::button::icon(widget::icon::from_name(
+                        "utilities-terminal-symbolic",
+                    ))
+                    .extra_small()
+                    .tooltip(fl!("logs"))
+                    .on_press(Message::ShowLogs(
                         container.id.clone(),
                         container.name.clone(),
                     )),
@@ -433,17 +446,23 @@ impl DockerApplet {
                 .into()
         };
 
-        let image_row = widget::row()
-            .push(image_text)
-            .push(widget::horizontal_space())
+        let name_row = widget::row()
+            .push(text::body(&container.name).width(Length::Fill))
             .push(actions)
             .align_y(Alignment::Center)
             .spacing(8);
 
+        // Row 2: image
+        let image_row = text::caption(&container.image);
+
+        // Row 3: status
+        let status_row = text::caption(&container.status);
+
         widget::column()
             .push(name_row)
             .push(image_row)
-            .spacing(4)
+            .push(status_row)
+            .spacing(2)
             .padding(8)
             .width(Length::Fill)
             .into()
@@ -485,5 +504,13 @@ impl DockerApplet {
             .spacing(4)
             .width(Length::Fill)
             .into()
+    }
+}
+
+fn format_memory(mb: f64) -> String {
+    if mb >= 1024.0 {
+        format!("{:.1}G", mb / 1024.0)
+    } else {
+        format!("{:.0}M", mb)
     }
 }
