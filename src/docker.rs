@@ -1,7 +1,9 @@
 use bollard::container::{
-    ListContainersOptions, LogsOptions, RestartContainerOptions, StartContainerOptions,
-    StopContainerOptions, Stats, StatsOptions,
+    InspectContainerOptions, ListContainersOptions, LogsOptions, RemoveContainerOptions,
+    RestartContainerOptions, StartContainerOptions, Stats, StatsOptions, StopContainerOptions,
 };
+use bollard::models::{EventMessageTypeEnum, HealthStatusEnum, PortTypeEnum};
+use bollard::system::EventsOptions;
 use bollard::Docker;
 use cosmic::iced::Subscription;
 use cosmic::iced_futures::stream;
@@ -18,6 +20,28 @@ pub enum ContainerState {
     Other(String),
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct PortMapping {
+    pub public_port: Option<u16>,
+    pub private_port: u16,
+    pub protocol: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum HealthStatus {
+    None,
+    Starting,
+    Healthy,
+    Unhealthy,
+}
+
+#[derive(Debug, Clone)]
+pub struct ContainerDetails {
+    pub env_vars: Vec<String>,
+    pub volumes: Vec<(String, String)>,
+    pub networks: Vec<(String, String)>,
+}
+
 #[derive(Debug, Clone)]
 pub struct ContainerInfo {
     pub id: String,
@@ -25,6 +49,9 @@ pub struct ContainerInfo {
     pub image: String,
     pub state: ContainerState,
     pub status: String,
+    pub ports: Vec<PortMapping>,
+    pub labels: HashMap<String, String>,
+    pub created: Option<i64>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -39,6 +66,14 @@ pub struct ContainerStats {
 pub enum DockerEvent {
     ContainersUpdated(Result<Vec<ContainerInfo>, String>),
     StatsUpdated(HashMap<String, ContainerStats>),
+    HealthUpdated(HashMap<String, HealthStatus>),
+    LogLine(String, String),
+    ContainerLifecycleEvent {
+        action: String,
+        container_id: String,
+        container_name: String,
+        attributes: HashMap<String, String>,
+    },
 }
 
 fn parse_state(state: &str) -> ContainerState {
@@ -134,6 +169,111 @@ pub fn container_stats_subscription(container_ids: Vec<String>) -> Subscription<
     )
 }
 
+pub fn docker_events_subscription() -> Subscription<DockerEvent> {
+    Subscription::run_with_id(
+        "docker-events",
+        stream::channel(20, move |mut output| async move {
+            loop {
+                let docker = match Docker::connect_with_local_defaults() {
+                    Ok(d) => d,
+                    Err(_) => {
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                        continue;
+                    }
+                };
+
+                let options = EventsOptions::<String> {
+                    ..Default::default()
+                };
+
+                let mut event_stream = docker.events(Some(options));
+                while let Some(event_result) = event_stream.next().await {
+                    match event_result {
+                        Ok(event) => {
+                            if event.typ != Some(EventMessageTypeEnum::CONTAINER) {
+                                continue;
+                            }
+                            let action = event.action.unwrap_or_default();
+                            let actor = event.actor.unwrap_or_default();
+                            let container_id = actor.id.unwrap_or_default();
+                            let attributes = actor.attributes.unwrap_or_default();
+                            let container_name = attributes
+                                .get("name")
+                                .cloned()
+                                .unwrap_or_default();
+
+                            let _ = output
+                                .send(DockerEvent::ContainerLifecycleEvent {
+                                    action,
+                                    container_id,
+                                    container_name,
+                                    attributes,
+                                })
+                                .await;
+                        }
+                        Err(_) => break,
+                    }
+                }
+
+                // Stream ended, reconnect after a delay
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+        }),
+    )
+}
+
+pub fn log_streaming_subscription(container_id: String) -> Subscription<DockerEvent> {
+    Subscription::run_with_id(
+        format!("docker-logs-{}", container_id),
+        stream::channel(100, move |mut output| async move {
+            let docker = match Docker::connect_with_local_defaults() {
+                Ok(d) => d,
+                Err(_) => return,
+            };
+
+            let options = LogsOptions::<String> {
+                follow: true,
+                stdout: true,
+                stderr: true,
+                tail: "200".to_string(),
+                ..Default::default()
+            };
+
+            let mut log_stream = docker.logs(&container_id, Some(options));
+            while let Some(log_result) = log_stream.next().await {
+                match log_result {
+                    Ok(line) => {
+                        let _ = output
+                            .send(DockerEvent::LogLine(
+                                container_id.clone(),
+                                line.to_string(),
+                            ))
+                            .await;
+                    }
+                    Err(_) => break,
+                }
+            }
+        }),
+    )
+}
+
+pub fn health_subscription(container_ids: Vec<String>) -> Subscription<DockerEvent> {
+    if container_ids.is_empty() {
+        return Subscription::none();
+    }
+
+    Subscription::run_with_id(
+        "docker-health",
+        stream::channel(10, move |mut output| async move {
+            loop {
+                let statuses = fetch_health_statuses(&container_ids).await;
+                let _ = output.send(DockerEvent::HealthUpdated(statuses)).await;
+                tokio::time::sleep(Duration::from_secs(10)).await;
+            }
+        }),
+    )
+}
+
 async fn fetch_containers() -> Result<Vec<ContainerInfo>, String> {
     let docker = Docker::connect_with_local_defaults().map_err(|e| e.to_string())?;
 
@@ -161,12 +301,34 @@ async fn fetch_containers() -> Result<Vec<ContainerInfo>, String> {
             let state_str = c.state.unwrap_or_default();
             let status = c.status.unwrap_or_default();
 
+            let ports = c
+                .ports
+                .unwrap_or_default()
+                .into_iter()
+                .map(|p| PortMapping {
+                    public_port: p.public_port.map(|pp| pp as u16),
+                    private_port: p.private_port as u16,
+                    protocol: match p.typ {
+                        Some(PortTypeEnum::TCP) => "tcp".to_string(),
+                        Some(PortTypeEnum::UDP) => "udp".to_string(),
+                        Some(PortTypeEnum::SCTP) => "sctp".to_string(),
+                        _ => "tcp".to_string(),
+                    },
+                })
+                .collect();
+
+            let labels = c.labels.unwrap_or_default();
+            let created = c.created;
+
             ContainerInfo {
                 id,
                 name,
                 image,
                 state: parse_state(&state_str),
                 status,
+                ports,
+                labels,
+                created,
             }
         })
         .collect())
@@ -232,27 +394,98 @@ pub async fn restart_container(id: String) -> Result<String, String> {
     Ok(id)
 }
 
-pub async fn fetch_logs(id: String) -> Result<(String, String), String> {
+pub async fn remove_container(id: String) -> Result<String, String> {
+    let docker = Docker::connect_with_local_defaults().map_err(|e| e.to_string())?;
+    docker
+        .remove_container(
+            &id,
+            Some(RemoveContainerOptions {
+                force: false,
+                v: false,
+                ..Default::default()
+            }),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(id)
+}
+
+pub async fn fetch_container_details(id: String) -> Result<(String, ContainerDetails), String> {
     let docker = Docker::connect_with_local_defaults().map_err(|e| e.to_string())?;
 
-    let options = LogsOptions::<String> {
-        stdout: true,
-        stderr: true,
-        tail: "100".to_string(),
-        ..Default::default()
+    let inspect = docker
+        .inspect_container(&id, None::<InspectContainerOptions>)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let env_vars = inspect
+        .config
+        .as_ref()
+        .and_then(|c| c.env.clone())
+        .unwrap_or_default();
+
+    let volumes = inspect
+        .mounts
+        .unwrap_or_default()
+        .into_iter()
+        .map(|m| {
+            let source = m.source.unwrap_or_default();
+            let destination = m.destination.unwrap_or_default();
+            (source, destination)
+        })
+        .collect();
+
+    let networks = inspect
+        .network_settings
+        .and_then(|ns| ns.networks)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(name, config)| {
+            let ip = config.ip_address.unwrap_or_default();
+            (name, ip)
+        })
+        .collect();
+
+    Ok((
+        id,
+        ContainerDetails {
+            env_vars,
+            volumes,
+            networks,
+        },
+    ))
+}
+
+async fn fetch_health_statuses(container_ids: &[String]) -> HashMap<String, HealthStatus> {
+    let docker = match Docker::connect_with_local_defaults() {
+        Ok(d) => d,
+        Err(_) => return HashMap::new(),
     };
 
-    let logs: Vec<_> = docker.logs(&id, Some(options)).collect().await;
+    let mut results = HashMap::new();
 
-    let mut output = String::new();
-    for log in logs {
-        match log {
-            Ok(line) => {
-                output.push_str(&line.to_string());
+    for id in container_ids {
+        let inspect = docker
+            .inspect_container(id, None::<InspectContainerOptions>)
+            .await;
+        let status = match inspect {
+            Ok(info) => {
+                let health = info
+                    .state
+                    .and_then(|s| s.health)
+                    .and_then(|h| h.status);
+                match health {
+                    Some(HealthStatusEnum::HEALTHY) => HealthStatus::Healthy,
+                    Some(HealthStatusEnum::UNHEALTHY) => HealthStatus::Unhealthy,
+                    Some(HealthStatusEnum::STARTING) => HealthStatus::Starting,
+                    _ => HealthStatus::None,
+                }
             }
-            Err(e) => return Err(e.to_string()),
-        }
+            Err(_) => HealthStatus::None,
+        };
+        results.insert(id.clone(), status);
     }
 
-    Ok((id, output))
+    results
 }
+

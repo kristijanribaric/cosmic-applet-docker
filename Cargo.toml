@@ -16,3 +16,5 @@ i18n-embed = { version = "0.16", features = ["fluent-system", "desktop-requester
 i18n-embed-fl = "0.10"
 rust-embed = "8"
 once_cell = "1"
+open = "5"
+notify-rust = "4"
